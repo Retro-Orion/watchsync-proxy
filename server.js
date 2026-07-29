@@ -1,0 +1,153 @@
+/*
+ * WatchSync video proxy.
+ * Run: node server.js   (listens on http://0.0.0.0:PORT, default 8090)
+ *
+ * GET /proxy?url=<encoded original video URL>
+ *   - Fetches the real video from wherever it's hosted.
+ * - Forces the correct Content-Type based on the file extension, instead of
+ *   trusting whatever (possibly wrong) type the origin server declares.
+ * - Forwards Range requests so seeking/streaming still works.
+ * - Understands Google Drive share links and works around Drive's
+ *   "can't scan this file for viruses" interstitial page for large files.
+ */
+const http = require('http');
+const { URL } = require('url');
+
+const PORT = process.env.PORT || 8090;
+
+const EXT_TO_TYPE = {
+  mp4: 'video/mp4',
+  m4v: 'video/x-m4v',
+  mov: 'video/quicktime',
+  mkv: 'video/x-matroska',
+  webm: 'video/webm',
+  m3u8: 'application/vnd.apple.mpegurl',
+  ts: 'video/mp2t',
+};
+
+function guessContentType(urlStr) {
+  const clean = urlStr.split('?')[0].split('#')[0];
+  const m = clean.match(/\.([a-zA-Z0-9]+)$/);
+  const ext = m ? m[1].toLowerCase() : '';
+  return EXT_TO_TYPE[ext] || 'video/mp4'; // default to mp4 if unknown
+}
+
+function isDriveShareLink(urlStr) {
+  return /drive\.google\.com\/(file\/d\/|open\?id=|uc\?)/.test(urlStr);
+}
+
+function extractDriveFileId(urlStr) {
+  let m = urlStr.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (m) return m[1];
+  m = urlStr.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (m) return m[1];
+  return null;
+}
+
+// Follows Google Drive's large-file "virus scan warning" interstitial and
+// returns the real, final download URL. Standard, widely-used technique.
+async function resolveDriveUrl(fileId) {
+  const direct = `https://drive.google.com/uc?export=download&id=${fileId}`;
+  const res1 = await fetch(direct, { redirect: 'follow' });
+  const type1 = res1.headers.get('content-type') || '';
+
+  if (!type1.includes('text/html')) {
+    // Small file — Drive served it directly, no warning page.
+    return res1.url;
+  }
+
+  // Large file — Drive returned the warning HTML page. Extract the confirm
+  // token and cookie, then re-request with confirmation.
+  const html = await res1.text();
+  const confirmMatch = html.match(/confirm=([0-9A-Za-z_-]+)/);
+  const confirm = confirmMatch ? confirmMatch[1] : 't';
+  const setCookie = res1.headers.get('set-cookie') || '';
+
+  return {
+    url: `https://drive.google.com/uc?export=download&confirm=${confirm}&id=${fileId}`,
+    cookie: setCookie,
+  };
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const reqUrl = new URL(req.url, `http://${req.headers.host}`);
+
+    if (reqUrl.pathname !== '/proxy') {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('WatchSync proxy is running. Use /proxy?url=<video url>');
+      return;
+    }
+
+    const target = reqUrl.searchParams.get('url');
+    if (!target || !/^https?:\/\//i.test(target)) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' });
+      res.end('Missing or invalid "url" parameter.');
+      return;
+    }
+
+    let fetchUrl = target;
+    let extraHeaders = {};
+
+    if (isDriveShareLink(target)) {
+      const fileId = extractDriveFileId(target);
+      if (!fileId) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Could not parse Google Drive file ID from that link.');
+        return;
+      }
+      const resolved = await resolveDriveUrl(fileId);
+      if (typeof resolved === 'string') {
+        fetchUrl = resolved;
+      } else {
+        fetchUrl = resolved.url;
+        if (resolved.cookie) extraHeaders['Cookie'] = resolved.cookie;
+      }
+    }
+
+    // Forward Range header so the player can seek / stream in chunks.
+    if (req.headers.range) extraHeaders['Range'] = req.headers.range;
+
+    const originRes = await fetch(fetchUrl, { headers: extraHeaders, redirect: 'follow' });
+
+    if (!originRes.ok && originRes.status !== 206) {
+      res.writeHead(originRes.status, { 'Content-Type': 'text/plain' });
+      res.end(`Origin server returned ${originRes.status}.`);
+      return;
+    }
+
+    const headers = {
+      'Content-Type': guessContentType(target), // forced, correct type
+      'Accept-Ranges': 'bytes',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-store',
+    };
+    const len = originRes.headers.get('content-length');
+    if (len) headers['Content-Length'] = len;
+    const range = originRes.headers.get('content-range');
+    if (range) headers['Content-Range'] = range;
+
+    res.writeHead(originRes.status === 206 ? 206 : 200, headers);
+
+    // Stream the body through without buffering the whole file in memory.
+    const reader = originRes.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch (err) {
+    console.error('Proxy error:', err.message);
+    if (!res.headersSent) {
+      res.writeHead(502, { 'Content-Type': 'text/plain' });
+      res.end('Proxy error: ' + err.message);
+    } else {
+      res.end();
+    }
+  }
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`WatchSync proxy listening on http://0.0.0.0:${PORT}`);
+});

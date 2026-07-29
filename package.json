@@ -1,0 +1,8 @@
+{
+  "name": "watchsync-proxy",
+  "version": "1.0.0",
+  "description": "WatchSync video proxy - fixes mislabeled Content-Type headers and Google Drive links",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
