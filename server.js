@@ -9,6 +9,9 @@
  * - Forwards Range requests so seeking/streaming still works.
  * - Understands Google Drive share links and works around Drive's
  *   "can't scan this file for viruses" interstitial page for large files.
+ * - Refuses to relay HTML pages (e.g. a Google sign-in page for a Drive file
+ *   that isn't shared publicly) — returns a clear error instead of feeding
+ *   the player a web page labeled as video.
  */
 const http = require('http');
 const { URL } = require('url');
@@ -113,6 +116,20 @@ const server = http.createServer(async (req, res) => {
     if (!originRes.ok && originRes.status !== 206) {
       res.writeHead(originRes.status, { 'Content-Type': 'text/plain' });
       res.end(`Origin server returned ${originRes.status}.`);
+      return;
+    }
+
+    // Never relay an HTML page as if it were video. This happens when a Drive
+    // file isn't shared publicly (Google serves its sign-in page) or when a
+    // host serves an error/landing page instead of the file.
+    const originType = (originRes.headers.get('content-type') || '').toLowerCase();
+    if (originType.includes('text/html')) {
+      res.writeHead(502, { 'Content-Type': 'text/plain' });
+      res.end(
+        isDriveShareLink(target)
+          ? 'Google Drive returned a web page instead of the video. Make sure the file is shared as "Anyone with the link" (Viewer).'
+          : 'The origin server returned a web page instead of a video file.'
+      );
       return;
     }
 
