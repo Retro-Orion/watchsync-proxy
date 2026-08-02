@@ -88,6 +88,21 @@ async function resolveDriveUrl(fileId) {
   };
 }
 
+// Some origin hosts (shared cPanel servers especially) occasionally kill the
+// first connection ("terminated"). Retry a couple of times before giving up.
+async function fetchWithRetry(url, opts, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try { return await fetch(url, opts); }
+    catch (e) {
+      lastErr = e;
+      console.log(`Origin fetch attempt ${i + 1} failed: ${e.message}`);
+      await new Promise((r) => setTimeout(r, 700 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const reqUrl = new URL(req.url, `http://${req.headers.host}`);
@@ -127,7 +142,11 @@ const server = http.createServer(async (req, res) => {
     // Forward Range header so the player can seek / stream in chunks.
     if (req.headers.range) extraHeaders['Range'] = req.headers.range;
 
-    const originRes = await fetch(fetchUrl, { headers: extraHeaders, redirect: 'follow' });
+    // A browser-like User-Agent keeps picky shared hosts happy.
+    extraHeaders['User-Agent'] =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
+    const originRes = await fetchWithRetry(fetchUrl, { headers: extraHeaders, redirect: 'follow' });
 
     if (!originRes.ok && originRes.status !== 206) {
       res.writeHead(originRes.status, { 'Content-Type': 'text/plain' });
