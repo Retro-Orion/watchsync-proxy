@@ -48,7 +48,7 @@ function extractDriveFileId(urlStr) {
 }
 
 // Follows Google Drive's large-file "virus scan warning" interstitial and
-// returns the real, final download URL. Standard, widely-used technique.
+// returns the real, final download URL.
 async function resolveDriveUrl(fileId) {
   const direct = `https://drive.google.com/uc?export=download&id=${fileId}`;
   const res1 = await fetch(direct, { redirect: 'follow' });
@@ -59,16 +59,32 @@ async function resolveDriveUrl(fileId) {
     return res1.url;
   }
 
-  // Large file — Drive returned the warning HTML page. Extract the confirm
-  // token and cookie, then re-request with confirmation.
   const html = await res1.text();
+  const cookie = res1.headers.get('set-cookie') || '';
+
+  // Current Drive flow (2024+): the warning page contains a form that submits
+  // to drive.usercontent.google.com/download with hidden inputs (id, export,
+  // confirm, uuid, ...). Rebuild that request from the form.
+  const formMatch = html.match(/action="(https:\/\/drive\.usercontent\.google\.com\/download[^"]*)"/);
+  if (formMatch) {
+    const params = new URLSearchParams();
+    for (const tag of html.matchAll(/<input[^>]*>/g)) {
+      const n = tag[0].match(/name="([^"]+)"/);
+      const v = tag[0].match(/value="([^"]*)"/);
+      if (n) params.set(n[1], v ? v[1] : '');
+    }
+    if (!params.has('id')) params.set('id', fileId);
+    if (!params.has('export')) params.set('export', 'download');
+    if (!params.has('confirm')) params.set('confirm', 't');
+    return { url: `${formMatch[1]}?${params.toString()}`, cookie };
+  }
+
+  // Older flow: confirm token goes back to drive.google.com/uc.
   const confirmMatch = html.match(/confirm=([0-9A-Za-z_-]+)/);
   const confirm = confirmMatch ? confirmMatch[1] : 't';
-  const setCookie = res1.headers.get('set-cookie') || '';
-
   return {
     url: `https://drive.google.com/uc?export=download&confirm=${confirm}&id=${fileId}`,
-    cookie: setCookie,
+    cookie,
   };
 }
 
