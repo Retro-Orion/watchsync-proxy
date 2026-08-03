@@ -107,7 +107,10 @@ const server = http.createServer(async (req, res) => {
   try {
     const reqUrl = new URL(req.url, `http://${req.headers.host}`);
 
-    if (reqUrl.pathname !== '/proxy') {
+    // Accept /proxy and also /proxy/anything.mp4 — iOS's player is happier
+    // when the URL path ends in a known video extension, so clients may append
+    // a cosmetic filename. Both forms behave identically.
+    if (reqUrl.pathname !== '/proxy' && !reqUrl.pathname.startsWith('/proxy/')) {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('WatchSync proxy is running. Use /proxy?url=<video url>');
       return;
